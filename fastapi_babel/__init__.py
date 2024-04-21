@@ -1,4 +1,4 @@
-from .core import Babel, BabelCli, _
+from .core import Babel, BabelCli, _, _pgettext, get_language_to_use, initialize_babel_of_request, get_babel_in_request, require_babel_in_request
 from .middleware import BabelMiddleware
 from .properties import RootConfigs as BabelConfigs
 
@@ -8,6 +8,11 @@ __all__ = [
     "Babel",
     "BabelCli",
     "BabelConfigs",
+    "get_language_to_use",
+    "initialize_babel_of_request",
+    "get_babel_in_request",
+    "require_babel_in_request",
     "_",
+    "_pgettext",
     "BabelMiddleware",
 ]

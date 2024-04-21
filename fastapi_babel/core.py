@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from gettext import gettext, translation
+import re
+from gettext import gettext, pgettext, translation, NullTranslations
 from subprocess import run
 from typing import Callable, Optional
+from fastapi import Request
 
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
+from pathlib import Path
 
 from .helpers import check_click_import, check_jinja_import
 from .properties import RootConfigs
@@ -46,8 +49,7 @@ class Babel:
     def locale(self, value: str) -> None:
         self.__locale = value
 
-    @property
-    def gettext(self) -> Callable[[str], str]:
+    def get_translation(self) -> NullTranslations | None:
         if self.default_locale != self.locale:
             gt = translation(
                 self.domain,
@@ -55,8 +57,23 @@ class Babel:
                 [self.locale],
             )
             gt.install()
+            return gt
+
+    @property
+    def gettext(self) -> Callable[[str], str]:
+        gt = self.get_translation()
+        if gt is not None:
             return gt.gettext
         return gettext
+
+
+    @property
+    def pgettext(self) -> Callable[[str, str], str]:
+        gt = self.get_translation()
+        if gt is not None:
+            return gt.pgettext
+        return pgettext
+
 
     def install_jinja(self, templates: Jinja2Templates) -> None:
         """
@@ -105,23 +122,22 @@ def make_gettext(request: Request) -> Callable[[str], str]:
 
     def translate(message: str) -> str:
         # Get Babel instance from request or fallback to the CLI instance (when defined)
-        babel = getattr(request.state, "babel", Babel.instance)
-        if babel is None:
-            raise BabelProxyError(
-                "Babel instance is not available in the current request context."
-            )
-
+        babel = require_babel_in_request(request)
         return babel.gettext(message)
 
     return translate
 
 
 _context_var: ContextVar[Callable[[str], str]] = ContextVar("gettext")
+_context_var_pgettext: ContextVar[Callable[[str, str], str]] = ContextVar("pgettext")
 
 
 def _(message: str) -> str:
     gettext = _context_var.get()
     return gettext(message)
+
+def _pgettext(context: str, message: str) -> str:
+    return _context_var_pgettext.get()(context, message)
 
 
 lazy_gettext = __LazyText
@@ -310,3 +326,86 @@ class BabelCli:
                 echo(err)
 
         cmd()
+
+
+def initialize_babel_of_request(request: Request, babel_configs: RootConfigs, real_lang_code: str, jinja2_templates: Optional[Jinja2Templates] = None) -> Babel:
+    # Create a new Babel instance per request
+    babel = get_babel_in_request(request)
+    if babel is None:
+        request.state.babel = babel = Babel(configs=babel_configs)
+        request.state.babel.locale = real_lang_code
+        if jinja2_templates:
+            request.state.babel.install_jinja(jinja2_templates)
+
+    _context_var.set(
+        request.state.babel.gettext
+    )  # Set the _ function in the context variable
+    _context_var_pgettext.set(
+        request.state.babel.pgettext
+    )
+    return babel
+
+
+LANGUAGES_PATTERN = re.compile(r"([a-z]{2})-?([A-Z]{2})?(;q=\d.\d{1,3})?")
+
+
+def get_language_to_use(babel_configs: RootConfigs, lang_code: str | None) -> str:
+    """Applies an available language.
+
+    To apply an available language it will be searched in the language folder for an available one
+    and will also priotize the one with the highest quality value. The Fallback language will be the
+    taken from the BABEL_DEFAULT_LOCALE var.
+
+        Args:
+            babel (Babel): Request scoped Babel instance
+            lang_code (str): The Value of the Accept-Language Header.
+
+        Returns:
+            str: The language that should be used.
+    """
+    if not lang_code:
+        return babel_configs.BABEL_DEFAULT_LOCALE
+
+    matches = re.finditer(LANGUAGES_PATTERN, lang_code)
+    languages = [
+        (f"{m.group(1)}{f'_{m.group(2)}' if m.group(2) else ''}", m.group(3) or "")
+        for m in matches
+    ]
+    languages = sorted(
+        languages, key=lambda x: x[1], reverse=True
+    )  # sort the priority, no priority comes last
+    translation_directory = Path(babel_configs.BABEL_TRANSLATION_DIRECTORY)
+    translation_files = [i.name for i in translation_directory.iterdir()]
+    explicit_priority = None
+
+    for lang, quality in languages:
+        if lang in translation_files:
+            if (
+                not quality
+            ):  # languages without quality value having the highest priority 1
+                return lang
+
+            elif (
+                not explicit_priority
+            ):  # set language with explicit priority <= priority 1
+                explicit_priority = lang
+
+    # Return language with explicit priority or default value
+    return (
+        explicit_priority
+        if explicit_priority
+        else babel_configs.BABEL_DEFAULT_LOCALE
+    )
+
+
+def get_babel_in_request(request: Request) -> Babel | None:
+    return getattr(request.state, "babel", Babel.instance)
+
+
+def require_babel_in_request(request: Request) -> Babel:
+    babel = get_babel_in_request(request)
+    if babel is None:
+        raise BabelProxyError(
+            "Babel instance is not available in the current request context."
+        )
+    return babel
