@@ -393,8 +393,9 @@ def get_language_to_use(babel_configs: RootConfigs, lang_code: str | None) -> st
     # Return language with explicit priority or default value
     return (
         explicit_priority
-        if explicit_priority
-        else babel_configs.BABEL_DEFAULT_LOCALE
+        or (
+            lang_code if any(map(lambda x: x.startswith(lang_code), translation_files)) else babel_configs.BABEL_DEFAULT_LOCALE
+        )
     )
 
 
